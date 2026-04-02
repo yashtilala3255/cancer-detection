@@ -1,88 +1,54 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dense, Dropout, Flatten, GlobalAveragePooling2D
+from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D, BatchNormalization
+from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.preprocessing.image import ImageDataGenerator, load_img, img_to_array
-from tensorflow.keras.applications import EfficientNetB0
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 
-# ── CONFIG ──────────────────────────────────────────────────────────────────
-IMG_SIZE    = 224
-BATCH_SIZE  = 16
-EPOCHS      = 20
-# UPDATE THIS PATH to your actual Data folder:
-DATA_DIR    = r"C:\Users\yeaht\OneDrive\Desktop\Skin-Cancer-Classification-using-Deep-Learning\Data"
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+BASE_DIR   = r"C:\Users\yeaht\OneDrive\Desktop\Skin-Cancer-Classification-using-Deep-Learning"
+DATA_DIR   = os.path.join(BASE_DIR, "Data")
+TRAIN_DIR  = os.path.join(DATA_DIR, "train")
+IMG_SIZE   = 224
+BATCH_SIZE = 32
+EPOCHS     = 25
 # ─────────────────────────────────────────────────────────────────────────────
 
 print("=" * 60)
-print("  Skin Cancer Detection — Training Script")
+print("  Skin Cancer Detection — Final Training Script")
 print("=" * 60)
-print(f"\nTensorFlow version : {tf.__version__}")
-print(f"Image size         : {IMG_SIZE}x{IMG_SIZE}")
-print(f"Batch size         : {BATCH_SIZE}")
-print(f"Max epochs         : {EPOCHS}")
-print(f"Data directory     : {DATA_DIR}\n")
 
+benign_dir    = os.path.join(TRAIN_DIR, "benign")
+malignant_dir = os.path.join(TRAIN_DIR, "malignant")
+benign_count    = len(os.listdir(benign_dir))
+malignant_count = len(os.listdir(malignant_dir))
 
-# ── STEP 1: Find dataset ─────────────────────────────────────────────────────
-# Try to find train/test folders automatically
-train_dir = None
-test_dir  = None
+print(f"\nBenign    : {benign_count}")
+print(f"Malignant : {malignant_count}")
 
-for root, dirs, files in os.walk(DATA_DIR):
-    for d in dirs:
-        lower = d.lower()
-        if lower == "train":
-            train_dir = os.path.join(root, d)
-        elif lower in ["test", "val", "valid", "validation"]:
-            test_dir = os.path.join(root, d)
+total       = benign_count + malignant_count
+w_benign    = (1 / benign_count)    * total / 2.0
+w_malignant = (1 / malignant_count) * total / 2.0
+class_weight = {0: w_benign, 1: w_malignant}
+print(f"Class weights → benign: {w_benign:.3f}, malignant: {w_malignant:.3f}")
 
-if train_dir is None:
-    # If no train folder found, use Sample Images folder directly
-    sample_dir = os.path.join(DATA_DIR, "Sample Images")
-    if os.path.exists(sample_dir):
-        print(f"No train/ folder found. Using Sample Images folder: {sample_dir}")
-        print("NOTE: For best results, organize images into subfolders per class.")
-        print("  e.g. Data/train/benign/  and  Data/train/malignant/\n")
-        train_dir = sample_dir
-    else:
-        print(f"ERROR: Could not find a training folder inside: {DATA_DIR}")
-        print("Please make sure your Data folder has this structure:")
-        print("  Data/")
-        print("    train/")
-        print("      benign/      <- benign images here")
-        print("      malignant/   <- malignant images here")
-        print("    test/")
-        print("      benign/")
-        print("      malignant/")
-        exit(1)
-
-print(f"Train directory : {train_dir}")
-print(f"Test  directory : {test_dir if test_dir else 'Not found — will use 20% of train data'}\n")
-
-
-# ── STEP 2: Data generators ──────────────────────────────────────────────────
+# ── Data generators ───────────────────────────────────────────────────────────
 train_datagen = ImageDataGenerator(
     rescale=1.0 / 255,
-    rotation_range=30,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    shear_range=0.2,
-    zoom_range=0.2,
+    rotation_range=20,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
     horizontal_flip=True,
-    vertical_flip=True,
-    validation_split=0.2   # use 20% for validation if no separate test folder
+    zoom_range=0.1,
+    validation_split=0.2
 )
 
-test_datagen = ImageDataGenerator(rescale=1.0 / 255)
-
-print("Loading training images...")
-train_generator = train_datagen.flow_from_directory(
-    train_dir,
+print("\nLoading images...")
+train_gen = train_datagen.flow_from_directory(
+    TRAIN_DIR,
     target_size=(IMG_SIZE, IMG_SIZE),
     batch_size=BATCH_SIZE,
     class_mode="binary",
@@ -90,9 +56,8 @@ train_generator = train_datagen.flow_from_directory(
     shuffle=True
 )
 
-print("Loading validation images...")
-val_generator = train_datagen.flow_from_directory(
-    train_dir,
+val_gen = train_datagen.flow_from_directory(
+    TRAIN_DIR,
     target_size=(IMG_SIZE, IMG_SIZE),
     batch_size=BATCH_SIZE,
     class_mode="binary",
@@ -100,128 +65,115 @@ val_generator = train_datagen.flow_from_directory(
     shuffle=False
 )
 
-print(f"\nClass labels : {train_generator.class_indices}")
-print(f"Training samples   : {train_generator.samples}")
-print(f"Validation samples : {val_generator.samples}\n")
+print(f"Class map    : {train_gen.class_indices}")
+print(f"Train images : {train_gen.samples}")
+print(f"Val images   : {val_gen.samples}")
 
-if train_generator.samples == 0:
-    print("ERROR: No images found!")
-    print("Make sure your images are inside class subfolders like:")
-    print("  Data/train/benign/image1.jpg")
-    print("  Data/train/malignant/image2.jpg")
-    exit(1)
+# ── Build model using MobileNetV2 (better for small datasets) ─────────────────
+print("\nBuilding MobileNetV2 model...")
 
-
-# ── STEP 3: Build model (EfficientNetB0 transfer learning) ───────────────────
-print("Building EfficientNetB0 model with transfer learning...")
-
-base_model = EfficientNetB0(
+base = MobileNetV2(
     weights="imagenet",
     include_top=False,
     input_shape=(IMG_SIZE, IMG_SIZE, 3)
 )
-base_model.trainable = False   # freeze base layers
+
+# Unfreeze last 30 layers for fine-tuning
+base.trainable = True
+for layer in base.layers[:-30]:
+    layer.trainable = False
+
+trainable = sum(1 for l in base.layers if l.trainable)
+print(f"Trainable base layers : {trainable} / {len(base.layers)}")
 
 model = Sequential([
-    base_model,
+    base,
     GlobalAveragePooling2D(),
-    Dense(256, activation="relu"),
-    Dropout(0.5),
-    Dense(1, activation="sigmoid")   # binary: benign vs malignant
+    BatchNormalization(),
+    Dense(128, activation="relu"),
+    Dropout(0.4),
+    Dense(1, activation="sigmoid")
 ])
 
 model.compile(
     optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
     loss="binary_crossentropy",
-    metrics=["accuracy"]
+    metrics=["accuracy", tf.keras.metrics.AUC(name="auc")]
 )
 
 model.summary()
 
-
-# ── STEP 4: Callbacks ────────────────────────────────────────────────────────
+# ── Callbacks ─────────────────────────────────────────────────────────────────
 callbacks = [
-    EarlyStopping(
-        monitor="val_accuracy",
-        patience=5,
-        restore_best_weights=True,
-        verbose=1
-    ),
-    ModelCheckpoint(
-        filepath="best_model.h5",
-        monitor="val_accuracy",
-        save_best_only=True,
-        verbose=1
-    )
+    EarlyStopping(monitor="val_auc", patience=6,
+                  restore_best_weights=True, mode="max", verbose=1),
+    ModelCheckpoint("best_model.h5", monitor="val_auc",
+                    save_best_only=True, mode="max", verbose=1),
+    ReduceLROnPlateau(monitor="val_loss", factor=0.5,
+                      patience=3, min_lr=1e-7, verbose=1)
 ]
 
-
-# ── STEP 5: Train ────────────────────────────────────────────────────────────
+# ── Train ─────────────────────────────────────────────────────────────────────
 print("\n" + "=" * 60)
 print("  Starting Training...")
 print("=" * 60 + "\n")
 
 history = model.fit(
-    train_generator,
+    train_gen,
     epochs=EPOCHS,
-    validation_data=val_generator,
+    validation_data=val_gen,
+    class_weight=class_weight,
     callbacks=callbacks,
     verbose=1
 )
 
-
-# ── STEP 6: Evaluate ─────────────────────────────────────────────────────────
+# ── Evaluate ──────────────────────────────────────────────────────────────────
 print("\n" + "=" * 60)
-print("  Training Complete! Evaluating model...")
-print("=" * 60 + "\n")
+print("  Training Complete!")
+print("=" * 60)
+val_loss, val_acc, val_auc = model.evaluate(val_gen, verbose=0)
+print(f"  Validation Accuracy : {val_acc * 100:.2f}%")
+print(f"  Validation AUC      : {val_auc:.4f}")
+print(f"  Best model saved    : best_model.h5")
 
-val_loss, val_acc = model.evaluate(val_generator, verbose=0)
-print(f"Validation Accuracy : {val_acc * 100:.2f}%")
-print(f"Validation Loss     : {val_loss:.4f}")
-print(f"\nBest model saved to : best_model.h5")
+# ── Bias check ────────────────────────────────────────────────────────────────
+print("\nChecking predictions on sample images...")
+print(f"{'Image':<30} {'True Label':<12} {'Predicted':<12} {'Confidence'}")
+print("-" * 68)
 
+def predict_one(path, true_label):
+    img  = load_img(path, target_size=(IMG_SIZE, IMG_SIZE))
+    arr  = np.expand_dims(img_to_array(img) / 255.0, axis=0)
+    pred = float(model.predict(arr, verbose=0)[0][0])
+    label = "MALIGNANT" if pred >= 0.5 else "BENIGN"
+    conf  = pred if pred >= 0.5 else 1 - pred
+    match = "OK" if label.lower() == true_label.lower() else "WRONG"
+    print(f"{os.path.basename(path)[:28]:<30} {true_label:<12} {label:<12} {conf*100:.1f}%  {match}")
 
-# ── STEP 7: Plot accuracy and loss curves ────────────────────────────────────
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+for f in os.listdir(benign_dir)[:5]:
+    predict_one(os.path.join(benign_dir, f), "benign")
 
-axes[0].plot(history.history["accuracy"],     label="Train Accuracy",  color="blue")
-axes[0].plot(history.history["val_accuracy"], label="Val Accuracy",    color="orange")
-axes[0].set_title("Model Accuracy")
-axes[0].set_xlabel("Epoch")
-axes[0].set_ylabel("Accuracy")
-axes[0].legend()
-axes[0].grid(True)
+orig_malignant = [f for f in os.listdir(malignant_dir) if not f.startswith("aug_")]
+for f in orig_malignant[:5]:
+    predict_one(os.path.join(malignant_dir, f), "malignant")
 
-axes[1].plot(history.history["loss"],     label="Train Loss",  color="blue")
-axes[1].plot(history.history["val_loss"], label="Val Loss",    color="orange")
-axes[1].set_title("Model Loss")
-axes[1].set_xlabel("Epoch")
-axes[1].set_ylabel("Loss")
-axes[1].legend()
-axes[1].grid(True)
+# ── Plot ──────────────────────────────────────────────────────────────────────
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+axes[0].plot(history.history["accuracy"],     label="Train")
+axes[0].plot(history.history["val_accuracy"], label="Val")
+axes[0].set_title("Accuracy"); axes[0].legend(); axes[0].grid(True)
+
+axes[1].plot(history.history["loss"],     label="Train")
+axes[1].plot(history.history["val_loss"], label="Val")
+axes[1].set_title("Loss"); axes[1].legend(); axes[1].grid(True)
+
+axes[2].plot(history.history["auc"],     label="Train")
+axes[2].plot(history.history["val_auc"], label="Val")
+axes[2].set_title("AUC Score"); axes[2].legend(); axes[2].grid(True)
 
 plt.tight_layout()
 plt.savefig("training_results.png", dpi=150)
 plt.show()
-print("\nTraining graph saved to : training_results.png")
-
-
-# ── STEP 8: Prediction function ──────────────────────────────────────────────
-def predict_image(image_path):
-    """Predict a single image — benign or malignant."""
-    img   = load_img(image_path, target_size=(IMG_SIZE, IMG_SIZE))
-    arr   = img_to_array(img) / 255.0
-    arr   = np.expand_dims(arr, axis=0)
-    pred  = model.predict(arr, verbose=0)[0][0]
-    label = "MALIGNANT" if pred >= 0.5 else "BENIGN"
-    conf  = pred if pred >= 0.5 else 1 - pred
-    print(f"\nImage   : {os.path.basename(image_path)}")
-    print(f"Result  : {label}")
-    print(f"Confidence : {conf * 100:.1f}%")
-    return label, conf
-
-print("\n" + "=" * 60)
-print("  Done! Your model is ready.")
-print("=" * 60)
-print("\nTo predict a new image, add this at the bottom of the script:")
-print('  predict_image(r"path\\to\\your\\image.jpg")')
+print("\nGraph saved : training_results.png")
+print("Now run    : python app.py")

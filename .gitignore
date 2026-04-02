@@ -5,3 +5,4 @@ dataset/
 *.zip
 *.jpg
 *.png
+*.onnx
